@@ -76,7 +76,8 @@ public class ThriftTransportPool {
         final long minNanos = MILLISECONDS.toNanos(250);
         final long maxNanos = MINUTES.toNanos(1);
         long lastRun = System.nanoTime();
-        while (!connectionPool.shutdown) {
+        // loop often, to detect shutdowns quickly
+        while (!connectionPool.awaitShutdown(250)) {
           // don't close on every loop; instead, check based on configured max age, within bounds
           var threshold = Math.min(maxNanos,
               Math.max(minNanos, MILLISECONDS.toNanos(maxAgeMillis.getAsLong()) / 2));
@@ -85,8 +86,6 @@ public class ThriftTransportPool {
             closeExpiredConnections();
             lastRun = currentNanos;
           }
-          // loop often, to detect shutdowns quickly
-          Thread.sleep(250);
         }
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
@@ -323,6 +322,7 @@ public class ThriftTransportPool {
     final Lock[] locks;
     final ConcurrentHashMap<ThriftTransportKey,CachedConnections> connections =
         new ConcurrentHashMap<>();
+    private final Object shutdownMonitor = new Object();
     private volatile boolean shutdown = false;
 
     ConnectionPool() {
@@ -421,12 +421,24 @@ public class ThriftTransportPool {
         if (shutdown) {
           return;
         }
-        shutdown = true;
+        synchronized (shutdownMonitor) {
+          shutdown = true;
+          shutdownMonitor.notifyAll();
+        }
         connections.values().forEach(CachedConnections::closeAllTransports);
       } finally {
         for (Lock lock : locks) {
           lock.unlock();
         }
+      }
+    }
+
+    boolean awaitShutdown(long timeoutMillis) throws InterruptedException {
+      synchronized (shutdownMonitor) {
+        if (!shutdown) {
+          shutdownMonitor.wait(timeoutMillis);
+        }
+        return shutdown;
       }
     }
 
